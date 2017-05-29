@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 import os
 import sys
 import warnings
@@ -6,7 +8,8 @@ import warnings
 from colorama import Fore
 
 from .smartopen import smart_open
-from .units import FortranFile
+from .units import FortranFile, FortranModule
+from .graph import Graph
 
 # If graphviz is not installed, graphs can't be produced
 try:
@@ -22,9 +25,18 @@ except NameError:
     pass
 
 
-class FortranProject(object):
-    def __init__(self, name=None, excludes=None, files=None, macros={}, verbose=False):
+class FortranProject:
+    def __init__(self, name=None, exclude_files=None, files=None, ignore_modules=None,
+                 macros=None, verbose=False):
         """Create a list of FortranFile objects
+
+        Args:
+            name: Name of the project (default: name of current directory)
+            exclude_files: List of files to exclude
+            files: List of files to include (default: all in current directory)
+            ignore_modules: List of module names to ignore_mod
+            macros: Dictionary of module names and replacement values
+            verbose: Print more messages (default: False)
         """
 
         if name is None:
@@ -34,21 +46,33 @@ class FortranProject(object):
 
         if files is None:
             files = self.get_source()
+        elif not isinstance(files, list):
+            files = [files]
 
-        if excludes is not None:
-            files = set(files) - set(excludes)
+        if exclude_files is not None:
+            if not isinstance(exclude_files, list):
+                exclude_files = [exclude_files]
+            files = set(files) - set(exclude_files)
 
         self.files = {filename: FortranFile(filename, macros)
                       for filename in files}
         self.modules = self.get_modules()
 
-        self.remove_excluded_modules(excludes)
+        self.remove_ignored_modules(ignore_modules)
 
         self.depends_by_module = self.get_depends_by_module(verbose)
         self.depends_by_file = self.get_depends_by_file(verbose)
 
-    def get_source(self, extensions=[".f90", ".F90"]):
-        "Return all files ending with any of ext"
+    def get_source(self, extensions=None):
+        """Return all files ending with any of extensions (defaults to
+        [".f90", ".F90"])
+        """
+
+        if extensions is None:
+            extensions = [".f90", ".F90"]
+        elif not isinstance(extensions, list):
+            extensions = [extensions]
+
         tmp = os.listdir(".")
         files = []
         for ext in extensions:
@@ -75,9 +99,13 @@ class FortranProject(object):
                 try:
                     graph.append(self.modules[used_mod])
                 except KeyError:
+                    new_module = FortranModule(unit_type='module',
+                                               name=used_mod)
+                    graph.append(new_module)
+
                     print(Fore.RED + "Error" + Fore.RESET + " module " +
                           Fore.GREEN + used_mod + Fore.RESET +
-                          " not defined in any files. Skipping...",
+                          " not defined in any files. Creating empty ",
                           file=sys.stderr)
 
             depends[module] = sorted(graph,
@@ -96,19 +124,16 @@ class FortranProject(object):
     def get_depends_by_file(self, verbose=False):
         """Get the dependencies of each file in file_list
         """
-        # depends = defaultdict(list)
-        # for module, dependencies in self.depends_by_module.items():
-        #     for dependency in dependencies:
-        #         depends[module.source_file].append(
-        #             dependency.source_file)
-        #     depends[module.source_file].sort(
-        #         key=lambda f: f.filename)
         depends = {}
         for source_file in self.files.values():
             graph = []
             for mod in source_file.uses:
                 try:
-                    graph.append(self.modules[mod].source_file)
+                    mod_file = self.modules[mod].source_file
+                    # Don't add self as a dependency
+                    if mod_file.filename.lower() == source_file.filename.lower():
+                        continue
+                    graph.append(mod_file)
                 except KeyError:
                     print(Fore.RED + "Error" + Fore.RESET + " module " + Fore.GREEN +
                           mod + Fore.RESET + " not defined in any files. Skipping...",
@@ -176,37 +201,31 @@ class FortranProject(object):
         if filename is None:
             filename = self.name + ".dot"
 
-        # Start the graph
-        graph = gv.Digraph(name=filename, format=format)
+        graph = Graph(self.depends_by_module, filename=filename,
+                      format=format, view=view)
+        graph.draw()
 
-        for source_file in self.depends_by_file:
-            graph.node(source_file.filename)
-            for module in self.depends_by_file[source_file]:
-                # Add the edges to the graph
-                graph.edge(source_file.filename, module.filename)
-
-        graph.render(filename, view=view, cleanup=False)
-
-    def remove_excluded_modules(self, excludes=None):
-        """Remove the modules in iterable excludes from
+    def remove_ignored_modules(self, ignore_modules=None):
+        """Remove the modules in iterable ignore_modules from
         all dependencies
         """
-        if excludes is None:
+        if ignore_modules is None:
             return
+        elif not isinstance(ignore_modules, list):
+            ignore_modules = [ignore_modules]
+
         # Remove from module dict
-        for exclude in excludes:
-            self.modules.pop(exclude, None)
-        # Remove from 'used' modules
-        for module in self.modules.values():
-            for exclude in excludes:
+        for ignore_mod in ignore_modules:
+            self.modules.pop(ignore_mod, None)
+            # Remove from 'used' modules
+            for module in self.modules.values():
                 try:
-                    module.uses.remove(exclude)
+                    module.uses.remove(ignore_mod)
                 except ValueError:
                     pass
-        # Remove from 'used' files
-        for source_file in self.files.values():
-            for exclude in excludes:
+            # Remove from 'used' files
+            for source_file in self.files.values():
                 try:
-                    source_file.uses.remove(exclude)
+                    source_file.uses.remove(ignore_mod)
                 except ValueError:
                     pass
